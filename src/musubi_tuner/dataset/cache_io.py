@@ -383,7 +383,7 @@ def save_latent_cache_ernie_image(item_info: ItemInfo, latent: torch.Tensor):
 
 
 def save_text_encoder_output_cache_ernie_image(item_info: ItemInfo, embed: torch.Tensor):
-    """ERNIE-Image architecture. embed is variable-length [1, Seq, Dim]."""
+    """ERNIE-Image architecture. embed is variable-length [Seq, Dim]."""
     sd = {}
     dtype_str = dtype_to_str(embed.dtype)
     sd[f"varlen_text_embed_{dtype_str}"] = embed.detach().cpu()

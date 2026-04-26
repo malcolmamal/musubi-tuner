@@ -34,6 +34,38 @@ class GenerationSettings:
         self.dit_weight_dtype = dit_weight_dtype
 
 
+def _normalize_regex_argument(patterns: Optional[object]) -> Optional[str]:
+    if patterns is None:
+        return None
+    if isinstance(patterns, str):
+        stripped = patterns.strip()
+        return stripped or None
+    if isinstance(patterns, (list, tuple)):
+        normalized = [str(pattern).strip() for pattern in patterns if str(pattern).strip()]
+        if not normalized:
+            return None
+        return "|".join(f"(?:{pattern})" for pattern in normalized)
+    return str(patterns)
+
+
+def _normalize_lora_multipliers(args: argparse.Namespace) -> Optional[List[float]]:
+    if args.lora_weight is None or len(args.lora_weight) == 0:
+        return None
+
+    multipliers = args.lora_multiplier
+    if multipliers is None:
+        return [1.0] * len(args.lora_weight)
+    if isinstance(multipliers, (int, float)):
+        return [float(multipliers)] * len(args.lora_weight)
+    if len(multipliers) == 0:
+        return [1.0] * len(args.lora_weight)
+    if len(multipliers) == 1 and len(args.lora_weight) > 1:
+        return [float(multipliers[0])] * len(args.lora_weight)
+    if len(multipliers) != len(args.lora_weight):
+        raise ValueError("--lora_multiplier must have length 1 or match --lora_weight")
+    return [float(multiplier) for multiplier in multipliers]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="ERNIE-Image inference script")
 
@@ -47,9 +79,9 @@ def parse_args() -> argparse.Namespace:
 
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
-    parser.add_argument("--lora_multiplier", type=float, nargs="*", default=1.0, help="LoRA multiplier")
-    parser.add_argument("--include_patterns", type=str, nargs="*", default=None, help="LoRA module include patterns")
-    parser.add_argument("--exclude_patterns", type=str, nargs="*", default=None, help="LoRA module exclude patterns")
+    parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier")
+    parser.add_argument("--include_patterns", type=str, default=None, help="LoRA module include pattern regex")
+    parser.add_argument("--exclude_patterns", type=str, default=None, help="LoRA module exclude pattern regex")
     parser.add_argument(
         "--save_merged_model",
         type=str,
@@ -193,12 +225,15 @@ def load_dit_model(
         loading_device = device
 
     # load LoRA weights
+    include_pattern = _normalize_regex_argument(args.include_patterns)
+    exclude_pattern = _normalize_regex_argument(args.exclude_patterns)
+    lora_multipliers = _normalize_lora_multipliers(args)
     if args.lora_weight is not None and len(args.lora_weight) > 0:
         lora_weights_list = []
         for lora_weight in args.lora_weight:
             logger.info(f"Loading LoRA weight from: {lora_weight}")
             lora_sd = load_file(lora_weight)
-            lora_sd = filter_lora_state_dict(lora_sd, args.include_patterns, args.exclude_patterns)
+            lora_sd = filter_lora_state_dict(lora_sd, include_pattern, exclude_pattern)
             lora_weights_list.append(lora_sd)
     else:
         lora_weights_list = None
@@ -216,7 +251,7 @@ def load_dit_model(
         dit_weight_dtype=loading_weight_dtype,
         fp8_scaled=args.fp8_scaled,
         lora_weights_list=lora_weights_list,
-        lora_multipliers=args.lora_multiplier,
+        lora_multipliers=lora_multipliers,
         disable_numpy_memmap=args.disable_numpy_memmap,
     )
 

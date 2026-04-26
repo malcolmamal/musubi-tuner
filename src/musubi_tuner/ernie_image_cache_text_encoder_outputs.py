@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+def _resolve_text_encoder_dtype(args: argparse.Namespace) -> torch.dtype:
+    return torch.float8_e4m3fn if getattr(args, "fp8_llm", False) else torch.bfloat16
+
+
 def encode_and_save_batch(tokenizer, text_encoder, batch: list[ItemInfo], device: torch.device):
     prompts = [item.caption for item in batch]
 
@@ -50,7 +54,7 @@ def main():
 
     all_cache_files_for_dataset, all_cache_paths_for_dataset = cache_text_encoder_outputs.prepare_cache_files_and_paths(datasets)
 
-    te_dtype = torch.bfloat16
+    te_dtype = _resolve_text_encoder_dtype(args)
     logger.info(f"Loading text encoder from {args.text_encoder}")
     tokenizer, text_encoder = ernie_image_utils.load_text_encoder(
         args.text_encoder, dtype=te_dtype, device=device, disable_mmap=True, tokenizer_id=args.tokenizer

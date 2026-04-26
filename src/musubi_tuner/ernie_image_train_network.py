@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
+def _resolve_text_encoder_dtype(args: argparse.Namespace) -> torch.dtype:
+    return torch.float8_e4m3fn if getattr(args, "fp8_text_encoder", False) else torch.bfloat16
+
+
 class ErnieImageNetworkTrainer(NetworkTrainer):
     def __init__(self):
         super().__init__()
@@ -57,7 +61,11 @@ class ErnieImageNetworkTrainer(NetworkTrainer):
         prompts = load_prompts(sample_prompts)
 
         tokenizer, text_encoder = ernie_image_utils.load_text_encoder(
-            args.text_encoder, dtype=torch.bfloat16, device=device, disable_mmap=True, tokenizer_id=args.tokenizer
+            args.text_encoder,
+            dtype=_resolve_text_encoder_dtype(args),
+            device=device,
+            disable_mmap=True,
+            tokenizer_id=args.tokenizer,
         )
         text_encoder.eval()
 
@@ -298,6 +306,7 @@ def ernie_image_setup_parser(parser: argparse.ArgumentParser) -> argparse.Argume
     parser.add_argument("--fp8_scaled", action="store_true", help="use scaled fp8 for DiT")
     parser.add_argument("--text_encoder", type=str, default=None, help="Mistral3 text encoder .safetensors path")
     parser.add_argument("--tokenizer", type=str, default=None, help="tokenizer path (defaults to 'baidu/ERNIE-Image')")
+    parser.add_argument("--fp8_text_encoder", action="store_true", help="use fp8 for Text Encoder (Mistral3)")
     return parser
 
 

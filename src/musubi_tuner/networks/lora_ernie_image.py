@@ -13,6 +13,9 @@ logging.basicConfig(level=logging.INFO)
 import musubi_tuner.networks.lora as lora
 
 
+ERNIE_IMAGE_DEFAULT_EXCLUDE_PATTERNS = [r".*(adaLN_modulation|norm).*"]
+
+
 ERNIE_IMAGE_TARGET_REPLACE_MODULES = [
     "ErnieImageSharedAdaLNBlock",
     "ErnieImageAdaLNModulation",
@@ -35,6 +38,10 @@ def create_arch_network(
         exclude_patterns = []
     else:
         exclude_patterns = ast.literal_eval(exclude_patterns)
+
+    for default_pattern in ERNIE_IMAGE_DEFAULT_EXCLUDE_PATTERNS:
+        if default_pattern not in exclude_patterns:
+            exclude_patterns.append(default_pattern)
 
     kwargs["exclude_patterns"] = exclude_patterns
 
