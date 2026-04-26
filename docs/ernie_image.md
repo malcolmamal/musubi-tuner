@@ -130,7 +130,7 @@ accelerate launch --num_cpu_threads_per_process 1 --mixed_precision bf16 src/mus
 - **Requires** specifying `--vae` and `--text_encoder`.
 - **Requires** specifying `--network_module networks.lora_ernie_image`.
 - The optimal timestep sampling settings for ERNIE-Image are still unclear because no official training framework has been released. The official scheduler config (`scheduler/scheduler_config.json`) specifies `shift: 4.0` for inference, so starting training from `--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 4.0` is recommended; adjust as needed.
-- Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT) and `--fp8_llm` (for Text Encoder) are available.
+- Memory saving options like `--fp8_base` and `--fp8_scaled` (for DiT) and `--fp8_text_encoder` (for Text Encoder) are available.
 - `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 
 <details>
@@ -144,7 +144,7 @@ ERNIE-Imageの学習は専用のスクリプト`ernie_image_train_network.py`を
 - `--vae`、`--text_encoder`を指定する必要があります。
 - `--network_module networks.lora_ernie_image`を指定する必要があります。
 - 公式の学習フレームワークが未リリースのため、ERNIE-Imageのタイムステップサンプリング設定は不明です。公式のscheduler設定（`scheduler/scheduler_config.json`）では推論時に`shift: 4.0`が指定されているため、`--timestep_sampling shift --weighting_scheme none --discrete_flow_shift 4.0`をベースに調整することを推奨します。
-- `--fp8_base`、`--fp8_scaled`（DiT用）や`--fp8_llm`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
+- `--fp8_base`、`--fp8_scaled`（DiT用）や`--fp8_text_encoder`（テキストエンコーダー用）などのメモリ節約オプションが利用可能です。
 - メモリ節約のために`--gradient_checkpointing`および`--gradient_checkpointing_cpu_offload`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 
 </details>
@@ -152,7 +152,7 @@ ERNIE-Imageの学習は専用のスクリプト`ernie_image_train_network.py`を
 ### Memory Optimization
 
 - `--fp8_base` and `--fp8_scaled` options are available to reduce memory usage of DiT (specify both together). Quality may degrade slightly.
-- `--fp8_llm` option is available to reduce memory usage of Text Encoder (Mistral 3).
+- `--fp8_text_encoder` option is available to reduce memory usage of Text Encoder (Mistral 3).
 - `--gradient_checkpointing` and `--gradient_checkpointing_cpu_offload` are available for memory savings. See [HunyuanVideo documentation](./hunyuan_video.md#memory-optimization) for details.
 - `--blocks_to_swap` option is available to offload some blocks to CPU.
 
@@ -160,7 +160,7 @@ ERNIE-Imageの学習は専用のスクリプト`ernie_image_train_network.py`を
 <summary>日本語</summary>
 
 - DiTのメモリ使用量を削減するために、`--fp8_base`と`--fp8_scaled`オプションを指定可能です（同時に指定してください）。品質はやや低下する可能性があります。
-- Text Encoder (Mistral 3)のメモリ使用量を削減するために、`--fp8_llm`オプションを指定可能です。
+- Text Encoder (Mistral 3)のメモリ使用量を削減するために、`--fp8_text_encoder`オプションを指定可能です。
 - メモリ節約のために`--gradient_checkpointing`と`--gradient_checkpointing_cpu_offload`が利用可能です。詳細は[HunyuanVideoドキュメント](./hunyuan_video.md#memory-optimization)を参照してください。
 - `--blocks_to_swap`オプションで、一部のブロックをCPUにオフロードできます。
 

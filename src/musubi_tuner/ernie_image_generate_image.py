@@ -80,8 +80,20 @@ def parse_args() -> argparse.Namespace:
     # LoRA
     parser.add_argument("--lora_weight", type=str, nargs="*", required=False, default=None, help="LoRA weight path")
     parser.add_argument("--lora_multiplier", type=float, nargs="*", default=None, help="LoRA multiplier")
-    parser.add_argument("--include_patterns", type=str, default=None, help="LoRA module include pattern regex")
-    parser.add_argument("--exclude_patterns", type=str, default=None, help="LoRA module exclude pattern regex")
+    parser.add_argument(
+        "--include_patterns",
+        type=str,
+        nargs="*",
+        default=None,
+        help="LoRA module include regex pattern(s)",
+    )
+    parser.add_argument(
+        "--exclude_patterns",
+        type=str,
+        nargs="*",
+        default=None,
+        help="LoRA module exclude regex pattern(s)",
+    )
     parser.add_argument(
         "--save_merged_model",
         type=str,
