@@ -367,7 +367,7 @@ class ErnieImageTransformer2DModel(nn.Module):
     def dtype(self):
         return next(self.parameters()).dtype
 
-    def enable_gradient_checkpointing(self, cpu_offload: bool = False):
+    def enable_gradient_checkpointing(self, cpu_offload: bool = False, weight_cpu_offloading: bool = False, blocks_to_checkpoint=None):
         # TODO: implement cpu_offload support
         # Only wrap at the block level; avoid nested checkpointing inside self_attention.
         self.gradient_checkpointing = True
@@ -375,7 +375,7 @@ class ErnieImageTransformer2DModel(nn.Module):
     def disable_gradient_checkpointing(self):
         self.gradient_checkpointing = False
 
-    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False):
+    def enable_block_swap(self, num_blocks: int, device: torch.device, supports_backward: bool, use_pinned_memory: bool = False, swap_norms: bool = False):
         self.blocks_to_swap = num_blocks
 
         assert self.blocks_to_swap <= self.num_blocks - 2, (

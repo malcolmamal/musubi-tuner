@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 from torch import nn
 from accelerate import init_empty_weights
-from transformers import AutoModel, AutoTokenizer, AutoConfig
+from transformers import AutoModel, AutoTokenizer, AutoConfig, PreTrainedTokenizerFast
 
 from musubi_tuner.modules.fp8_optimization_utils import apply_fp8_monkey_patch
 from musubi_tuner.utils.lora_utils import load_safetensors_with_lora_and_fp8
@@ -19,7 +19,7 @@ logging.basicConfig(level=logging.INFO)
 ERNIE_IMAGE_ID = "baidu/ERNIE-Image"
 
 FP8_OPTIMIZATION_TARGET_KEYS = ["layers."]
-FP8_OPTIMIZATION_EXCLUDE_KEYS = ["adaLN_modulation", ".norm", "time_", "x_embedder", "text_proj", "final_"]
+FP8_OPTIMIZATION_EXCLUDE_KEYS = ["adaLN_modulation", ".norm", "adaLN_sa_ln", "adaLN_mlp_ln", "time_", "x_embedder", "text_proj", "final_"]
 
 ERNIE_IMAGE_TEXT_ENCODER_CONFIG_JSON = """\
 {
@@ -43,7 +43,7 @@ ERNIE_IMAGE_TEXT_ENCODER_CONFIG_JSON = """\
     "initializer_range": 0.02,
     "intermediate_size": 9216,
     "max_position_embeddings": 262144,
-    "model_type": "ministral3",
+    "model_type": "mistral",
     "num_attention_heads": 32,
     "num_hidden_layers": 26,
     "num_key_value_heads": 8,
@@ -211,7 +211,7 @@ def load_text_encoder(
         text_encoder.to(dtype)
 
     tok_path = tokenizer_id if tokenizer_id else ERNIE_IMAGE_ID
-    tokenizer = AutoTokenizer.from_pretrained(tok_path, use_fast=False, subfolder="tokenizer")
+    tokenizer = PreTrainedTokenizerFast.from_pretrained(tok_path, subfolder="tokenizer")
     return tokenizer, text_encoder
 
 
