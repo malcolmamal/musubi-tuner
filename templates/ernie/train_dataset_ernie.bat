@@ -139,8 +139,8 @@ echo [INFO] Running ERNIE-Image LoRA training...
   --network_module networks.lora_ernie_image ^
   --network_dim 32 ^
   --network_alpha 32 ^
-  --max_train_epochs 16 ^
-  --save_every_n_epochs 4 ^
+  --max_train_epochs 100 ^
+  --save_every_n_epochs 100 ^
   --seed 42 ^
   --output_dir output ^
   --output_name "%OUTPUT_NAME%"
