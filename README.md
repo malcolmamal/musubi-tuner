@@ -19,6 +19,7 @@
     - [Hardware Requirements](#hardware-requirements)
     - [Features](#features)
     - [Documentation](#documentation)
+      - [Training Guide: ERNIE-Image & LTX-2.3](./docs/training-guide-ernie-ltx23.md)
   - [Installation](#installation)
     - [pip based installation](#pip-based-installation)
     - [uv based installation](#uv-based-installation-experimental)
@@ -149,6 +150,9 @@ This approach ensures that you have full control over the instructions given to 
 
 For detailed information on specific architectures, configurations, and advanced features, please refer to the documentation below.
 
+**Getting started (step-by-step guides):**
+- [**Training Guide: ERNIE-Image & LTX-2.3 LoRA on Windows**](./docs/training-guide-ernie-ltx23.md) — Installation, model downloads, path configuration, template scripts, and troubleshooting for ERNIE-Image and LTX-2.3 training using the `templates/` scripts
+
 **Architecture-specific:**
 - [HunyuanVideo](./docs/hunyuan_video.md)
 - [Wan2.1/2.2](./docs/wan.md)
@@ -160,8 +164,9 @@ For detailed information on specific architectures, configurations, and advanced
 - [Z-Image](./docs/zimage.md)
 - [HunyuanVideo 1.5](./docs/hunyuan_video_1_5.md)
 - [Kandinsky 5](./docs/kandinsky5.md)
-- [LTX-2](./docs/ltx_2.md)
+- [LTX-2 / LTX-2.3](./docs/ltx_2.md)
 - [FLUX.2](./docs/flux_2.md)
+- [ERNIE-Image](./docs/ernie_image.md)
 
 **Common Configuration & Usage:**
 - [Dataset Configuration](./docs/dataset_config.md)
