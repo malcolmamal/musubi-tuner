@@ -12,7 +12,7 @@ if [ -z "${1:-}" ]; then
 fi
 
 DATASET_NAME="$1"
-SOURCE_DATASET_DIR="${SOURCE_DATASET_DIR:-$(pwd)/../ai-toolkit/datasets}/${DATASET_NAME}"
+SOURCE_DATASET_DIR="${SOURCE_DATASET_DIR:-$(pwd)/../ai-toolkit/datasets/${DATASET_NAME}}"
 CURRENTSET_DIR="${MUSUBI_ROOT}/datasets/currentset"
 CACHE_DIR="${MUSUBI_ROOT}/datasets/cache"
 STATUS_FILE="${MUSUBI_ROOT}/datasets/sdxl_${DATASET_NAME}.txt"
