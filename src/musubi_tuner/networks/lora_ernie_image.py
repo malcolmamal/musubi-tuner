@@ -1,0 +1,72 @@
+# LoRA module for ERNIE-Image
+
+import ast
+from typing import Dict, List, Optional
+import torch
+import torch.nn as nn
+
+import logging
+
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+import musubi_tuner.networks.lora as lora
+
+
+ERNIE_IMAGE_DEFAULT_EXCLUDE_PATTERNS = [r".*(adaLN_modulation|norm).*"]
+
+
+ERNIE_IMAGE_TARGET_REPLACE_MODULES = [
+    "ErnieImageSharedAdaLNBlock",
+    "ErnieImageAdaLNModulation",
+    "ErnieImageAdaLNContinuous",
+]
+
+
+def create_arch_network(
+    multiplier: float,
+    network_dim: Optional[int],
+    network_alpha: Optional[float],
+    vae: nn.Module,
+    text_encoders: List[nn.Module],
+    unet: nn.Module,
+    neuron_dropout: Optional[float] = None,
+    **kwargs,
+):
+    exclude_patterns = kwargs.get("exclude_patterns", None)
+    if exclude_patterns is None:
+        exclude_patterns = []
+    else:
+        exclude_patterns = ast.literal_eval(exclude_patterns)
+
+    for default_pattern in ERNIE_IMAGE_DEFAULT_EXCLUDE_PATTERNS:
+        if default_pattern not in exclude_patterns:
+            exclude_patterns.append(default_pattern)
+
+    kwargs["exclude_patterns"] = exclude_patterns
+
+    return lora.create_network(
+        ERNIE_IMAGE_TARGET_REPLACE_MODULES,
+        "lora_unet",
+        multiplier,
+        network_dim,
+        network_alpha,
+        vae,
+        text_encoders,
+        unet,
+        neuron_dropout=neuron_dropout,
+        **kwargs,
+    )
+
+
+def create_arch_network_from_weights(
+    multiplier: float,
+    weights_sd: Dict[str, torch.Tensor],
+    text_encoders: Optional[List[nn.Module]] = None,
+    unet: Optional[nn.Module] = None,
+    for_inference: bool = False,
+    **kwargs,
+) -> lora.LoRANetwork:
+    return lora.create_network_from_weights(
+        ERNIE_IMAGE_TARGET_REPLACE_MODULES, multiplier, weights_sd, text_encoders, unet, for_inference, **kwargs
+    )

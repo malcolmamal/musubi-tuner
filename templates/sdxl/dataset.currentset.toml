@@ -1,0 +1,17 @@
+# SDXL character LoRA dataset config for staged wrapper runs.
+# The wrapper copies a selected source dataset into datasets/currentset,
+# creates caption .txt sidecars with "sks" trigger word, then uses this config.
+
+[general]
+caption_extension = ".txt"
+keep_tokens = 1
+
+[[datasets]]
+resolution = 512
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = true
+
+  [[datasets.subsets]]
+  image_dir = "C:/Development/trainers/musubi-tuner/datasets/currentset"
+  num_repeats = 1
