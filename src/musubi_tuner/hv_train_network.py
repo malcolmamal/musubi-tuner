@@ -439,6 +439,31 @@ def load_prompts(prompt_file: str) -> list[Dict]:
     return prompts
 
 
+def compute_ideogram4_shift_timestep(
+    uniform_samples: torch.Tensor,
+    token_grid_height: int,
+    token_grid_width: int,
+    *,
+    image_patch_size: int = 16,
+    base_mean: float = 0.0,
+    std: float = 1.5,
+) -> torch.Tensor:
+    """Map uniform samples to Ideogram 4's resolution-aware logit-normal t."""
+    eps = 1e-7
+    u = torch.clamp(uniform_samples.to(torch.float64), eps, 1.0 - eps)
+    image_pixels = token_grid_height * image_patch_size * token_grid_width * image_patch_size
+    mean = base_mean + 0.5 * math.log(image_pixels / (512 * 512))
+    z = torch.special.ndtri(u)
+    # musubi convention: t=1 is pure noise, t=0 is clean. Higher resolution -> larger
+    # ``mean`` -> ``t`` skewed toward 1 (more noise). The trainer feeds the model
+    # ``model_t = 1 - t``, so this reproduces the inference schedule's
+    # ``model_t = 1 - sigmoid(mean + std * z)`` instead of mirroring it.
+    t = torch.special.expit(mean + std * z)
+    t_min = 1.0 / (1 + math.exp(0.5 * 18.0))
+    t_max = 1.0 / (1 + math.exp(0.5 * -15.0))
+    return t.clamp(1.0 - t_max, 1.0 - t_min).to(dtype=uniform_samples.dtype)
+
+
 def compute_density_for_timestep_sampling(
     weighting_scheme: str, batch_size: int, logit_mean: float = None, logit_std: float = None, mode_scale: float = None
 ):
@@ -1343,6 +1368,7 @@ class NetworkTrainer:
             or args.timestep_sampling == "qinglong_flux"
             or args.timestep_sampling == "qinglong_qwen"
             or args.timestep_sampling == "flux2_shift"
+            or args.timestep_sampling == "ideogram4_shift"
         ):
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
@@ -1369,6 +1395,10 @@ class NetworkTrainer:
                         t = torch.sigmoid(args.sigmoid_scale * randn(batch_size, org_timesteps))
                     else:
                         t = rand(batch_size, org_timesteps)
+
+                elif args.timestep_sampling == "ideogram4_shift":
+                    h, w = latents.shape[-2:]
+                    t = compute_ideogram4_shift_timestep(rand(batch_size, org_timesteps), h, w)
 
                 elif args.timestep_sampling.endswith("shift"):
                     if args.timestep_sampling == "shift":
@@ -5024,7 +5054,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timestep_sampling",
-        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "qwen_shift", "logsnr", "qinglong_flux", "qinglong_qwen", "shifted_logit_normal"],
+        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "qwen_shift", "ideogram4_shift", "logsnr", "qinglong_flux", "qinglong_qwen", "shifted_logit_normal"],
         default="sigma",
         help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal, shift of sigmoid, flux shift, "
         "or shifted_logit_normal (sequence-length-adaptive, official LTX-2 method)."

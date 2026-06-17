@@ -110,6 +110,28 @@ class LoRAModule(AdaptiveRankLoRAModuleMixin, torch.nn.Module):
         self.rank_dropout = rank_dropout
         self.module_dropout = module_dropout
 
+    def _autocast_enabled_for(self, x):
+        if not x.is_floating_point():
+            return False
+        try:
+            return torch.is_autocast_enabled(x.device.type)
+        except TypeError:
+            return torch.is_autocast_enabled()
+
+    def _lora_input(self, x):
+        if self.split_dims is None:
+            target_dtype = self.lora_down.weight.dtype
+        else:
+            target_dtype = self.lora_down[0].weight.dtype
+        if x.is_floating_point() and x.dtype != target_dtype and not self._autocast_enabled_for(x):
+            return x.to(target_dtype)
+        return x
+
+    def _match_org_dtype(self, delta, org_forwarded):
+        if delta.is_floating_point() and org_forwarded.is_floating_point() and delta.dtype != org_forwarded.dtype:
+            return delta.to(org_forwarded.dtype)
+        return delta
+
     def apply_to(self):
         self.org_forward = self.org_module.forward
         self.org_module.forward = self.forward
@@ -123,8 +145,9 @@ class LoRAModule(AdaptiveRankLoRAModuleMixin, torch.nn.Module):
             if torch.rand(1) < self.module_dropout:
                 return org_forwarded
 
+        lora_input = self._lora_input(x)
         if self.split_dims is None:
-            lx = self.lora_down(x)
+            lx = self.lora_down(lora_input)
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -150,9 +173,10 @@ class LoRAModule(AdaptiveRankLoRAModuleMixin, torch.nn.Module):
 
             lx = self.lora_up(lx)
 
-            return org_forwarded + lx * self.multiplier * scale
+            delta = self._match_org_dtype(lx * self.multiplier * scale, org_forwarded)
+            return org_forwarded + delta
         else:
-            lxs = [lora_down(x) for lora_down in self.lora_down]
+            lxs = [lora_down(lora_input) for lora_down in self.lora_down]
 
             # normal dropout
             if self.dropout is not None and self.training:
@@ -179,7 +203,8 @@ class LoRAModule(AdaptiveRankLoRAModuleMixin, torch.nn.Module):
 
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
 
-            return org_forwarded + torch.cat(lxs, dim=-1) * self.multiplier * scale
+            delta = self._match_org_dtype(torch.cat(lxs, dim=-1) * self.multiplier * scale, org_forwarded)
+            return org_forwarded + delta
 
 
 class LoRAInfModule(LoRAModule):
@@ -289,14 +314,19 @@ class LoRAInfModule(LoRAModule):
 
     def default_forward(self, x):
         # logger.info(f"default_forward {self.lora_name} {x.size()}")
+        lora_input = self._lora_input(x)
         if self.split_dims is None:
-            lx = self.lora_down(x)
+            lx = self.lora_down(lora_input)
             lx = self.lora_up(lx)
-            return self.org_forward(x) + lx * self.multiplier * self.scale
+            org_forwarded = self.org_forward(x)
+            delta = self._match_org_dtype(lx * self.multiplier * self.scale, org_forwarded)
+            return org_forwarded + delta
         else:
-            lxs = [lora_down(x) for lora_down in self.lora_down]
+            lxs = [lora_down(lora_input) for lora_down in self.lora_down]
             lxs = [lora_up(lx) for lora_up, lx in zip(self.lora_up, lxs)]
-            return self.org_forward(x) + torch.cat(lxs, dim=-1) * self.multiplier * self.scale
+            org_forwarded = self.org_forward(x)
+            delta = self._match_org_dtype(torch.cat(lxs, dim=-1) * self.multiplier * self.scale, org_forwarded)
+            return org_forwarded + delta
 
     def forward(self, x):
         if not self.enabled:
@@ -352,6 +382,7 @@ def create_network(
     neuron_dropout: Optional[float] = None,
     module_class: Type[object] = None,
     module_kwargs: Optional[Dict[str, Any]] = None,
+    linear_module_class_names: Optional[tuple[str, ...]] = None,
     **kwargs,
 ):
     """architecture independent network creation"""
@@ -436,6 +467,7 @@ def create_network(
         conv_alpha=conv_alpha,
         module_class=module_class,
         module_kwargs=module_kwargs,
+        linear_module_class_names=linear_module_class_names,
         exclude_patterns=exclude_patterns,
         include_patterns=include_patterns,
         verbose=verbose,
@@ -482,6 +514,7 @@ class LoRANetwork(AdaptiveRankLoRANetworkMixin, torch.nn.Module):
         module_kwargs: Optional[Dict[str, Any]] = None,
         modules_dim: Optional[Dict[str, int]] = None,
         modules_alpha: Optional[Dict[str, int]] = None,
+        linear_module_class_names: Optional[tuple[str, ...]] = None,
         exclude_patterns: Optional[List[str]] = None,
         include_patterns: Optional[List[str]] = None,
         verbose: Optional[bool] = False,
@@ -516,6 +549,7 @@ class LoRANetwork(AdaptiveRankLoRANetworkMixin, torch.nn.Module):
         self.cross_modal_dropout = cross_modal_dropout
         normalized_adaptive_rank_config = parse_adaptive_rank_network_kwargs(adaptive_rank_config or {})
         self._init_adaptive_rank_network_state(**normalized_adaptive_rank_config)
+        self.linear_module_class_names = linear_module_class_names or ("Linear",)
 
         self.loraplus_lr_ratio = None
         # self.loraplus_unet_lr_ratio = None
@@ -608,7 +642,7 @@ class LoRANetwork(AdaptiveRankLoRANetworkMixin, torch.nn.Module):
                         module = root_module  # search all modules
 
                     for child_name, child_module in module.named_modules():
-                        is_linear = child_module.__class__.__name__ == "Linear"
+                        is_linear = child_module.__class__.__name__ in self.linear_module_class_names
                         is_conv2d = child_module.__class__.__name__ == "Conv2d"
                         is_conv2d_1x1 = is_conv2d and child_module.kernel_size == (1, 1)
 
@@ -1110,6 +1144,7 @@ def create_network_from_weights(
     for_inference: bool = False,
     module_class: Optional[Type[object]] = None,
     module_kwargs: Optional[Dict[str, Any]] = None,
+    linear_module_class_names: Optional[tuple[str, ...]] = None,
     **kwargs,
 ) -> LoRANetwork:
     # get dim/alpha mapping
@@ -1140,5 +1175,6 @@ def create_network_from_weights(
         modules_alpha=modules_alpha,
         module_class=module_class,
         module_kwargs=module_kwargs,
+        linear_module_class_names=linear_module_class_names,
     )
     return network
