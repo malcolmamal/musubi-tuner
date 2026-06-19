@@ -322,7 +322,7 @@ def load_safetensors_with_fp8_optimization(
 
                 # Dequantize pre-quantized FP8 weights BEFORE weight_hook (LoRA merge),
                 # so the hook receives correct bf16 values instead of raw fp8
-                if value.dtype.itemsize == 1 and key.endswith(".weight"):
+                if value.dtype.itemsize == 1 and key.endswith(".weight") and not allow_prequantized_fp8:
                     ckpt_scale_key = key.replace(".weight", ".weight_scale")
                     if ckpt_scale_key in checkpoint_scale_keys:
                         ckpt_scale = original_f.get_tensor(ckpt_scale_key).to(value.device)

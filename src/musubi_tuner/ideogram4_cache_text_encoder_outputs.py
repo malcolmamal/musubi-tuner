@@ -6,8 +6,9 @@ import torch
 
 import musubi_tuner.cache_text_encoder_outputs as cache_text_encoder_outputs
 from musubi_tuner.dataset import config_utils
+from musubi_tuner.dataset.cache_io import save_text_encoder_output_cache_ideogram4
 from musubi_tuner.dataset.config_utils import BlueprintGenerator, ConfigSanitizer
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_IDEOGRAM4, ItemInfo, save_text_encoder_output_cache_ideogram4
+from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_IDEOGRAM4, ItemInfo
 from musubi_tuner.ideogram4 import ideogram4_utils
 
 logger = logging.getLogger(__name__)
