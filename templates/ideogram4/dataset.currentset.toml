@@ -3,7 +3,7 @@
 # creates empty .txt sidecars there, then uses this config for caching/training.
 
 [general]
-resolution = [1024, 1024]
+resolution = [512, 512]
 caption_extension = ".txt"
 batch_size = 1
 enable_bucket = true

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from accelerate import Accelerator
 
-from musubi_tuner.dataset.image_video_dataset import ARCHITECTURE_IDEOGRAM4, ARCHITECTURE_IDEOGRAM4_FULL
+from musubi_tuner.dataset.architectures import ARCHITECTURE_IDEOGRAM4, ARCHITECTURE_IDEOGRAM4_FULL
 from musubi_tuner.ideogram4 import ideogram4_utils
 from musubi_tuner.ideogram4.sampling_policy import should_use_unconditional_dit_for_lora_sampling
 from musubi_tuner.ideogram4.sampler_configs import PRESETS

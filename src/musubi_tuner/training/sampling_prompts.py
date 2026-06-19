@@ -113,6 +113,8 @@ def load_prompts(prompt_file: str) -> list[Dict]:
     elif prompt_file.endswith(".json"):
         with open(prompt_file, "r", encoding="utf-8") as f:
             prompts = json.load(f)
+    else:
+        raise ValueError(f"Unsupported prompt file type: {prompt_file}")
 
     # preprocess prompts
     for i in range(len(prompts)):
