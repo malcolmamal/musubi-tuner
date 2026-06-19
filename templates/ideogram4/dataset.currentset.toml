@@ -1,0 +1,15 @@
+# Image-only Ideogram 4 dataset config for staged wrapper runs.
+# The wrapper copies a selected source dataset into datasets/currentset,
+# creates empty .txt sidecars there, then uses this config for caching/training.
+
+[general]
+resolution = [512, 512]
+caption_extension = ".txt"
+batch_size = 1
+enable_bucket = true
+bucket_no_upscale = false
+
+[[datasets]]
+image_directory = "C:/Development/trainers/musubi-tuner/datasets/currentset"
+cache_directory = "C:/Development/trainers/musubi-tuner/datasets/cache"
+num_repeats = 1

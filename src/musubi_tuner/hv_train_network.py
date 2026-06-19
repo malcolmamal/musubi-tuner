@@ -439,6 +439,9 @@ def load_prompts(prompt_file: str) -> list[Dict]:
     return prompts
 
 
+from musubi_tuner.training.timesteps import compute_ideogram4_shift_timestep
+
+
 def compute_density_for_timestep_sampling(
     weighting_scheme: str, batch_size: int, logit_mean: float = None, logit_std: float = None, mode_scale: float = None
 ):
@@ -1343,6 +1346,7 @@ class NetworkTrainer:
             or args.timestep_sampling == "qinglong_flux"
             or args.timestep_sampling == "qinglong_qwen"
             or args.timestep_sampling == "flux2_shift"
+            or args.timestep_sampling == "ideogram4_shift"
         ):
 
             def compute_sampling_timesteps(org_timesteps: Optional[torch.Tensor]) -> torch.Tensor:
@@ -1369,6 +1373,10 @@ class NetworkTrainer:
                         t = torch.sigmoid(args.sigmoid_scale * randn(batch_size, org_timesteps))
                     else:
                         t = rand(batch_size, org_timesteps)
+
+                elif args.timestep_sampling == "ideogram4_shift":
+                    h, w = latents.shape[-2:]
+                    t = compute_ideogram4_shift_timestep(rand(batch_size, org_timesteps), h, w)
 
                 elif args.timestep_sampling.endswith("shift"):
                     if args.timestep_sampling == "shift":
@@ -5024,7 +5032,7 @@ def setup_parser_common() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--timestep_sampling",
-        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "qwen_shift", "logsnr", "qinglong_flux", "qinglong_qwen", "shifted_logit_normal"],
+        choices=["sigma", "uniform", "sigmoid", "shift", "flux_shift", "flux2_shift", "qwen_shift", "ideogram4_shift", "logsnr", "qinglong_flux", "qinglong_qwen", "shifted_logit_normal"],
         default="sigma",
         help="Method to sample timesteps: sigma-based, uniform random, sigmoid of random normal, shift of sigmoid, flux shift, "
         "or shifted_logit_normal (sequence-length-adaptive, official LTX-2 method)."

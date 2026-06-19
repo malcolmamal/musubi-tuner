@@ -1,6 +1,7 @@
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import dataclass
 import gc
 import time
 from typing import Optional
@@ -62,6 +63,81 @@ def weighs_to_device(layer: nn.Module, device: torch.device):
     for module in layer.modules():
         if hasattr(module, "weight") and module.weight is not None and module.__class__.__name__.endswith("Linear"):
             module.weight.data = module.weight.data.to(device, non_blocking=device.type != "cpu")
+
+
+@dataclass
+class BlockSwapConfig:
+    """
+    Construction policy for a block-swap offloader, assembled once by the training/inference script and
+    passed through each architecture's ``enable_block_swap`` to ``create_offloader``.
+
+    It holds everything the offloader constructor needs that is *not* architecture-specific. The
+    architecture-specific arguments (the block-type label, the block list, and its counts) are supplied by
+    ``enable_block_swap`` per block list. Adding a new offloader knob (or a whole new offloader type) means
+    adding a field here and a branch in ``create_offloader`` -- the per-architecture ``enable_block_swap``
+    signatures stay ``(blocks_to_swap, config)`` and never change.
+    """
+
+    device: torch.device
+    supports_backward: bool
+    use_pinned_memory: bool = False
+    h2d_only: bool = False  # frozen-base (LoRA / LoHa / LoKr) only: H2D-only streaming, no device->host copy
+    ring_size: int = 2  # (h2d_only) number of GPU ring buffers for streamed blocks; 2 = double buffering
+    debug: bool = False
+
+    @classmethod
+    def from_args(cls, args, device: torch.device, supports_backward: bool) -> "BlockSwapConfig":
+        """Build from a parsed-args namespace, tolerating scripts whose parser lacks the optional knobs."""
+        h2d_only = getattr(args, "block_swap_h2d_only", False)
+
+        if h2d_only and supports_backward and not getattr(args, "gradient_checkpointing", False):
+            raise ValueError(
+                "--block_swap_h2d_only requires --gradient_checkpointing for training. H2D-only block swap streams"
+                " frozen weights through a reused GPU ring buffer, which advances the autograd version of weights"
+                " saved for backward; gradient checkpointing re-reads them at recompute time and avoids this."
+            )
+
+        ring_size = getattr(args, "block_swap_ring_size", 2)
+        if ring_size < 1:
+            raise ValueError("--block_swap_ring_size must be >= 1")
+
+        return cls(
+            device=device,
+            supports_backward=supports_backward,
+            use_pinned_memory=getattr(args, "use_pinned_memory_for_block_swap", False),
+            h2d_only=h2d_only,
+            ring_size=ring_size,
+        )
+
+
+def create_offloader(block_type: str, blocks: list[nn.Module], num_blocks: int, blocks_to_swap: int, config: BlockSwapConfig):
+    """
+    Create the block-swap offloader for one block list. This is the single place that selects the offloader
+    implementation from ``config``; ``enable_block_swap`` only supplies the per-block-list arguments, so a new
+    offloader type plugs in here without touching any architecture.
+    """
+    if config.h2d_only:
+        return LoRAStreamOffloader(
+            block_type,
+            blocks,
+            num_blocks,
+            blocks_to_swap,
+            config.supports_backward,
+            config.device,
+            ring_size=config.ring_size,
+            use_pinned_memory=config.use_pinned_memory,
+            debug=config.debug,
+        )
+    return ModelOffloader(
+        block_type,
+        blocks,
+        num_blocks,
+        blocks_to_swap,
+        config.supports_backward,
+        config.device,
+        config.use_pinned_memory,
+        debug=config.debug,
+    )
 
 
 class Offloader:
@@ -477,3 +553,457 @@ class ModelOffloader(Offloader):
             block_idx_to_cuda = block_idx_to_cuda % self.num_blocks  # this works for forward-only offloading
 
         self._submit_move_blocks(blocks, block_idx_to_cpu, block_idx_to_cuda)
+
+
+class _DirectCopier:
+    """
+    Transfer engine for ``LoRAStreamOffloader`` when the masters are *pinned*: copies a flat pinned host
+    buffer straight into a flat device buffer on a private copy stream (async Host->Device only).
+    """
+
+    def __init__(self, device: torch.device, debug: bool = False):
+        self.device = device
+        self.debug = debug
+        self.copy_stream = torch.cuda.Stream(device=device)
+        self._events = {}  # key -> cuda.Event recording H2D completion
+        self._xfer = {}  # key -> (ev_a, ev_b) transfer-timing events (debug only)
+
+    def submit(self, key, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event=None):
+        """Begin the H2D copy of ``src_flat`` into ``dst_flat``, gated behind ``gate_event`` (compute done with dst)."""
+        ev_a = ev_b = None
+        with torch.cuda.stream(self.copy_stream):
+            if gate_event is not None:
+                self.copy_stream.wait_event(gate_event)
+            if self.debug:
+                ev_a = torch.cuda.Event(enable_timing=True)
+                ev_b = torch.cuda.Event(enable_timing=True)
+                ev_a.record(self.copy_stream)
+            dst_flat.copy_(src_flat, non_blocking=True)
+            if self.debug:
+                ev_b.record(self.copy_stream)
+                self._xfer[key] = (ev_a, ev_b)
+        self._events[key] = self.copy_stream.record_event()
+
+    def wait(self, key):
+        """Return the H2D-completion event for ``key`` (None if nothing is in flight for it)."""
+        return self._events.get(key)
+
+    def pop_xfer_timing(self, key):
+        """Pop the (start, end) transfer-timing events recorded for ``key`` (debug only)."""
+        return self._xfer.pop(key, None)
+
+    def sync(self):
+        self.copy_stream.synchronize()
+
+    def reset(self):
+        self._events.clear()
+        self._xfer.clear()
+
+
+class _StagedCopier:
+    """
+    Transfer engine for ``LoRAStreamOffloader`` when the masters are kept in *pageable* host memory: each
+    H2D is staged through a small pool of pinned buffers filled by a background worker thread.
+    """
+
+    def __init__(self, device: torch.device, num_staging: int = 2, debug: bool = False):
+        self.device = device
+        self.num_staging = max(1, num_staging)
+        self.debug = debug
+        self.copy_stream = torch.cuda.Stream(device=device)
+        self._pool = ThreadPoolExecutor(max_workers=1)
+        self._futures = {}  # key -> Future -> (load_event, (ev_a, ev_b))
+        self._xfer = {}  # key -> (ev_a, ev_b) transfer-timing events (debug only)
+        self._staging = None  # list[pinned uint8 tensor] (lazily sized to the flat block)
+        self._staging_free = None  # list[cuda.Event | None]: the H2D that last consumed each buffer
+        self._rr = 0  # round-robin staging index (touched only on the worker thread)
+
+    def _ensure_staging(self, nbytes: int):
+        if self._staging is None:
+            self._staging = [torch.empty(nbytes, dtype=torch.uint8).pin_memory(device=self.device) for _ in range(self.num_staging)]
+            self._staging_free = [None] * self.num_staging
+
+    def _run(self, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event):
+        idx = self._rr
+        self._rr = (idx + 1) % self.num_staging
+        staging = self._staging[idx]
+
+        free_ev = self._staging_free[idx]
+        if free_ev is not None:
+            free_ev.synchronize()
+
+        staging.copy_(src_flat)  # pageable -> pinned, plain CPU memcpy
+
+        ev_a = ev_b = None
+        with torch.cuda.stream(self.copy_stream):
+            if gate_event is not None:
+                self.copy_stream.wait_event(gate_event)
+            if self.debug:
+                ev_a = torch.cuda.Event(enable_timing=True)
+                ev_b = torch.cuda.Event(enable_timing=True)
+                ev_a.record(self.copy_stream)
+            dst_flat.copy_(staging, non_blocking=True)
+            if self.debug:
+                ev_b.record(self.copy_stream)
+            done = self.copy_stream.record_event()
+        self._staging_free[idx] = done
+        return done, (ev_a, ev_b)
+
+    def submit(self, key, dst_flat: torch.Tensor, src_flat: torch.Tensor, gate_event=None):
+        self._ensure_staging(src_flat.numel())
+        self._futures[key] = self._pool.submit(self._run, dst_flat, src_flat, gate_event)
+
+    def wait(self, key):
+        fut = self._futures.get(key)
+        if fut is None:
+            return None
+        load_event, xfer = fut.result()
+        if self.debug and xfer[0] is not None:
+            self._xfer[key] = xfer
+        return load_event
+
+    def pop_xfer_timing(self, key):
+        return self._xfer.pop(key, None)
+
+    def _flush(self):
+        for fut in list(self._futures.values()):
+            fut.result()
+
+    def sync(self):
+        self._flush()
+        self.copy_stream.synchronize()
+
+    def reset(self):
+        self._flush()
+        self.copy_stream.synchronize()
+        self._futures.clear()
+        self._xfer.clear()
+        if self._staging is not None:
+            self._staging_free = [None] * self.num_staging
+
+    def __del__(self):
+        pool = getattr(self, "_pool", None)
+        if pool is not None:
+            pool.shutdown(wait=False)
+
+
+class LoRAStreamOffloader:
+    """
+    H2D-only offloader for training where the base weights are frozen (e.g. LoRA / LoHa / LoKr).
+
+    The classic block swap (``ModelOffloader``) *exchanges* a block: it copies one block back to the
+    CPU (Device->Host) while copying the next one in (Host->Device). When the base weights never change,
+    the CPU already holds an identical copy, so the D2H half is pure overhead. This offloader keeps a
+    permanent (pinned) master copy of every streamed weight on the CPU and only ever copies Host->Device,
+    removing the D2H transfer and the CPU-side staging memcpy entirely.
+    """
+
+    def __init__(
+        self,
+        block_type: str,
+        blocks: list[nn.Module],
+        num_blocks: int,
+        blocks_to_swap: int,
+        supports_backward: bool,
+        device: torch.device,
+        ring_size: int = 2,
+        use_pinned_memory: bool = True,
+        debug: bool = False,
+    ):
+        self.block_type = block_type
+        self._blocks = blocks
+        self.num_blocks = num_blocks
+        self.blocks_to_swap = blocks_to_swap
+        self.device = device
+        self.use_pinned_memory = use_pinned_memory
+        self.supports_backward = supports_backward
+        self.forward_only = not supports_backward
+
+        import os
+
+        if not debug:
+            debug = os.getenv("MUSUBI_TUNER_OFFLOADER_DEBUG", "0") == "1"
+        self.debug = debug
+        self.debug_interval = int(os.getenv("MUSUBI_TUNER_OFFLOADER_DEBUG_INTERVAL", "10"))
+
+        assert device.type == "cuda", "LoRAStreamOffloader currently supports CUDA only"
+
+        # streaming placement: S evenly spaced block indices
+        stream_idx = sorted({((2 * i + 1) * num_blocks) // (2 * blocks_to_swap) for i in range(blocks_to_swap)})
+        self.stream_idx = stream_idx
+        self.S = len(stream_idx)
+        self.rank = {b: k for k, b in enumerate(stream_idx)}
+        self.is_stream = [b in self.rank for b in range(num_blocks)]
+        self.B = min(ring_size, self.S)
+
+        # finetuning guard
+        for b in stream_idx:
+            for m in self._swap_modules(blocks[b]):
+                assert not m.weight.requires_grad, (
+                    "LoRAStreamOffloader requires frozen base weights (LoRA / no full fine-tune). "
+                    f"Found a trainable Linear weight in block {b}."
+                )
+
+        # transfer engine
+        if use_pinned_memory:
+            self.copier = _DirectCopier(device, debug=self.debug)
+        else:
+            self.copier = _StagedCopier(device, num_staging=self.B, debug=self.debug)
+
+        # runtime state (GPU buffers allocated lazily)
+        self.cpu_master = {}
+        self.cpu_flat = {}
+        self.ring_param = None
+        self.ring_flat = None
+        self._layout = None
+        self.in_slot = [None] * self.B
+        self.free_event = [None] * self.B
+        self._module_cache = {}
+
+        self._wait_ctx = "fwd"
+        if self.debug:
+            self._dbg_reset()
+
+        # backward hooks
+        if supports_backward:
+            self.remove_handles = []
+            for i, block in enumerate(blocks):
+                hook = self._create_backward_hook(i)
+                if hook is not None:
+                    self.remove_handles.append(block.register_full_backward_hook(hook))
+
+        print(
+            f"LoRAStreamOffloader[{block_type}]: H2D-only block swap. "
+            f"{self.S} streaming / {num_blocks} blocks, ring={self.B}, pinned={use_pinned_memory}. "
+            f"streaming indices: {stream_idx}"
+        )
+
+    # ------------------------------------------------------------------ helpers
+
+    def _swap_modules(self, block: nn.Module) -> list[nn.Module]:
+        mods = []
+        for _, m in block.named_modules():
+            if hasattr(m, "weight") and m.weight is not None and m.__class__.__name__.endswith("Linear"):
+                mods.append(m)
+        return mods
+
+    def _modules(self, block_idx: int) -> list[nn.Module]:
+        cached = self._module_cache.get(block_idx)
+        if cached is None:
+            cached = self._swap_modules(self._blocks[block_idx])
+            self._module_cache[block_idx] = cached
+        return cached
+
+    def _bind(self, block_idx: int, params: list[nn.Parameter]):
+        for m, p in zip(self._modules(block_idx), params):
+            m.weight = p
+
+    @staticmethod
+    def _compute_layout(weights: list[torch.Tensor]) -> tuple[list[int], int]:
+        align = 256
+        offsets = []
+        total = 0
+        for w in weights:
+            total = (total + align - 1) // align * align
+            offsets.append(total)
+            total += w.numel() * w.element_size()
+        return offsets, total
+
+    def _flat_views(self, flat: torch.Tensor, weights: list[torch.Tensor]) -> list[torch.Tensor]:
+        offsets, _ = self._layout
+        return [flat[off : off + w.numel() * w.element_size()].view(w.dtype).view(w.shape) for off, w in zip(offsets, weights)]
+
+    def _load(self, rank: int, slot: int, ctx: str = "fwd"):
+        blk = self.stream_idx[rank]
+
+        if self.in_slot[slot] == blk:
+            self._bind(blk, self.ring_param[slot])
+            return
+
+        prev = self.in_slot[slot]
+        if prev is not None:
+            self._bind(prev, self.cpu_master[prev])
+
+        self.copier.submit(blk, self.ring_flat[slot], self.cpu_flat[blk], self.free_event[slot])
+
+        self._bind(blk, self.ring_param[slot])
+        self.in_slot[slot] = blk
+
+        if self.debug:
+            c = self._cur[ctx]
+            c["loads"] += 1
+            xfer = self.copier.pop_xfer_timing(blk)
+            if xfer is not None:
+                c["xfer_ev"].append(xfer)
+
+    # ------------------------------------------------------------------ public interface
+
+    def set_forward_only(self, forward_only: bool):
+        self.copier.sync()
+        self.forward_only = forward_only
+
+    def __del__(self):
+        if getattr(self, "supports_backward", False):
+            for handle in getattr(self, "remove_handles", []):
+                handle.remove()
+
+    def prepare_block_devices_before_forward(self, blocks: list[nn.Module]):
+        if self.S == 0:
+            return
+
+        if self.debug:
+            print(f"[{self.block_type}] Prepare block devices before forward (H2D-only)")
+
+        first_time = not self.cpu_master
+        cpu_device = torch.device("cpu")
+        for i, b in enumerate(blocks):
+            if not self.is_stream[i]:
+                if first_time:
+                    b.to(self.device)
+                    weighs_to_device(b, self.device)
+                continue
+
+            if first_time:
+                b.to(self.device)
+                mods = self._modules(i)
+                weights = [m.weight.data for m in mods]
+                if self._layout is None:
+                    self._layout = self._compute_layout(weights)
+                flat = torch.empty(self._layout[1], dtype=torch.uint8, device=cpu_device)
+                if self.use_pinned_memory:
+                    flat = flat.pin_memory(device=self.device)
+                master = []
+                for m, view in zip(mods, self._flat_views(flat, weights)):
+                    view.copy_(m.weight.data)
+                    m.weight.data = view
+                    master.append(m.weight)
+                self.cpu_flat[i] = flat
+                self.cpu_master[i] = master
+            else:
+                self._bind(i, self.cpu_master[i])
+
+        # validate homogeneous streaming blocks
+        template = self.cpu_master[self.stream_idx[0]]
+        for b in self.stream_idx[1:]:
+            assert len(self.cpu_master[b]) == len(template), f"block {b} has a different number of swap weights"
+            for p, t in zip(self.cpu_master[b], template):
+                assert p.data.shape == t.data.shape and p.data.dtype == t.data.dtype, (
+                    f"block {b} swap-weight shape/dtype differs from the streaming template"
+                )
+
+        # preallocate the GPU ring (once)
+        if self.ring_param is None:
+            template_weights = [p.data for p in template]
+            self.ring_flat = [torch.empty(self._layout[1], dtype=torch.uint8, device=self.device) for _ in range(self.B)]
+            self.ring_param = [
+                [nn.Parameter(view, requires_grad=False) for view in self._flat_views(flat, template_weights)]
+                for flat in self.ring_flat
+            ]
+
+        # reset and preload
+        self.free_event = [None] * self.B
+        self.copier.reset()
+        for k in range(self.B):
+            self._load(k, k)
+
+        _synchronize_device(self.device)
+        _clean_memory_on_device(self.device)
+
+    def wait_for_block(self, block_idx: int):
+        if self.S == 0 or not self.is_stream[block_idx]:
+            return
+        ctx = self._wait_ctx
+        if self.debug and ctx == "fwd" and block_idx == self.stream_idx[0]:
+            self._dbg_boundary()
+        j = self.rank[block_idx]
+        slot = j % self.B
+        if self.in_slot[slot] != block_idx:
+            if self.debug:
+                self._cur[ctx]["self_heal"] += 1
+            self._load(j, slot, ctx)
+        ev = self.copier.wait(block_idx)
+        if ev is None:
+            return
+        if not self.debug:
+            torch.cuda.current_stream().wait_event(ev)
+            return
+        s = torch.cuda.current_stream()
+        c = self._cur[ctx]
+        c["waits"] += 1
+        if not ev.query():
+            c["not_ready"] += 1
+        ev_a = torch.cuda.Event(enable_timing=True)
+        ev_b = torch.cuda.Event(enable_timing=True)
+        ev_a.record(s)
+        s.wait_event(ev)
+        ev_b.record(s)
+        c["stall_ev"].append((ev_a, ev_b))
+        xfer = self.copier.pop_xfer_timing(block_idx)
+        if xfer is not None:
+            c["xfer_ev"].append(xfer)
+
+    def submit_move_blocks_forward(self, blocks: list[nn.Module], block_idx: int):
+        if self.S == 0 or not self.is_stream[block_idx]:
+            return
+        j = self.rank[block_idx]
+        self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
+        if j + self.B < self.S:
+            self._load(j + self.B, (j + self.B) % self.B, "fwd")
+        elif self.forward_only and j == self.S - 1 and self.S > self.B:
+            for k in range(self.B):
+                self._load(k, k, "fwd")
+
+    def _create_backward_hook(self, block_index: int):
+        prefetch = self.is_stream[block_index]
+        wait_prev = block_index - 1 >= 0 and self.is_stream[block_index - 1]
+        if not prefetch and not wait_prev:
+            return None
+
+        def backward_hook(module, grad_input, grad_output):
+            if prefetch:
+                j = self.rank[block_index]
+                self.free_event[j % self.B] = torch.cuda.current_stream().record_event()
+                if j - self.B >= 0:
+                    self._load(j - self.B, (j - self.B) % self.B, "bwd")
+            if wait_prev:
+                self._wait_ctx = "bwd"
+                self.wait_for_block(block_index - 1)
+                self._wait_ctx = "fwd"
+            return None
+
+        return backward_hook
+
+    # ------------------------------------------------------------------ debug timing
+
+    def _dbg_reset(self):
+        self._dbg_empty = lambda: {"stall_ev": [], "xfer_ev": [], "waits": 0, "not_ready": 0, "self_heal": 0, "loads": 0}
+        self._cur = {"fwd": self._dbg_empty(), "bwd": self._dbg_empty()}
+        self._roll = {"fwd": defaultdict(float), "bwd": defaultdict(float)}
+        self._step = 0
+
+    def _dbg_boundary(self):
+        if not any(self._cur[c]["waits"] or self._cur[c]["loads"] for c in ("fwd", "bwd")):
+            return
+        torch.cuda.synchronize()
+        for ctx in ("fwd", "bwd"):
+            c, r = self._cur[ctx], self._roll[ctx]
+            r["stall_ms"] += sum(a.elapsed_time(b) for a, b in c["stall_ev"])
+            r["xfer_ms"] += sum(a.elapsed_time(b) for a, b in c["xfer_ev"])
+            for k in ("waits", "not_ready", "self_heal", "loads"):
+                r[k] += c[k]
+            self._cur[ctx] = self._dbg_empty()
+        self._step += 1
+        if self._step % self.debug_interval == 0:
+            self._dbg_print()
+
+    def _dbg_print(self):
+        n = self.debug_interval
+        print(f"[{self.block_type}] H2D-only timing (avg over {n} steps):")
+        for ctx in ("fwd", "bwd"):
+            r = self._roll[ctx]
+            print(
+                f"  {ctx}: stall {r['stall_ms'] / n:6.2f} ms/step, H2D {r['xfer_ms'] / n:6.2f} ms/step"
+                f" | waits {r['waits'] / n:.1f}, not-ready {r['not_ready'] / n:.1f},"
+                f" self-heal {r['self_heal'] / n:.1f}, loads {r['loads'] / n:.1f}"
+            )
+            self._roll[ctx] = defaultdict(float)

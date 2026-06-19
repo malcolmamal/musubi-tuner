@@ -12,6 +12,7 @@ from musubi_tuner.dataset.architectures import (
     ARCHITECTURE_FLUX_KONTEXT_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_FULL,
     ARCHITECTURE_HUNYUAN_VIDEO_1_5_FULL,
+    ARCHITECTURE_IDEOGRAM4_FULL,
     ARCHITECTURE_KANDINSKY5_FULL,
     ARCHITECTURE_QWEN_IMAGE_FULL,
     ARCHITECTURE_WAN_FULL,
@@ -243,6 +244,18 @@ def save_latent_cache_z_image(item_info: ItemInfo, latent: torch.Tensor):
     save_latent_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_latent_cache_ideogram4(item_info: ItemInfo, latent: torch.Tensor):
+    """Ideogram 4 architecture."""
+    assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
+
+    _, H, W = latent.shape
+    F = 1
+    dtype_str = dtype_to_str(latent.dtype)
+    sd = {f"latents_{F}x{H}x{W}_{dtype_str}": latent.detach().cpu().contiguous()}
+
+    save_latent_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL)
+
+
 def save_latent_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
     metadata = {
         "architecture": arch_fullname,
@@ -371,6 +384,15 @@ def save_text_encoder_output_cache_z_image(item_info: ItemInfo, embed: torch.Ten
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_Z_IMAGE_FULL)
 
 
+def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torch.Tensor):
+    """Ideogram 4 architecture."""
+    sd = {}
+    dtype_str = dtype_to_str(features.dtype)
+    sd[f"varlen_i4_llm_features_{dtype_str}"] = features.detach().cpu()
+
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL, merge_existing=False)
+
+
 def save_latent_cache_ernie_image(item_info: ItemInfo, latent: torch.Tensor):
     """ERNIE-Image architecture. latent is patchified+BN-normalized [C, H, W]."""
     assert latent.dim() == 3, "latent should be 3D tensor (channel, height, width)"
@@ -391,7 +413,15 @@ def save_text_encoder_output_cache_ernie_image(item_info: ItemInfo, embed: torch
     save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_ERNIE_IMAGE_FULL)
 
 
-def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, torch.Tensor], arch_fullname: str):
+def save_text_encoder_output_cache_common(
+    item_info: ItemInfo,
+    sd: dict[str, torch.Tensor],
+    arch_fullname: str,
+    merge_existing: bool = True,
+):
+    # merge_existing keeps keys written by previous passes (e.g. HunyuanVideo caches LLM and CLIP separately).
+    # Single-pass architectures that write their full key set at once should pass merge_existing=False so the
+    # cache is overwritten fresh, dropping any stale keys (e.g. optionals/dtypes) left from an earlier run.
     for key, value in sd.items():
         # NaN check and show warning, replace NaN with 0
         if torch.isnan(value).any():
@@ -403,8 +433,7 @@ def save_text_encoder_output_cache_common(item_info: ItemInfo, sd: dict[str, tor
         "caption1": item_info.caption,
         "format_version": "1.0.1",
     }
-
-    if os.path.exists(item_info.text_encoder_output_cache_path):
+    if merge_existing and os.path.exists(item_info.text_encoder_output_cache_path):
         # load existing cache and update metadata
         with safetensors_utils.MemoryEfficientSafeOpen(item_info.text_encoder_output_cache_path) as f:
             existing_metadata = f.metadata()
