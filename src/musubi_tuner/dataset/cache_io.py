@@ -390,7 +390,7 @@ def save_text_encoder_output_cache_ideogram4(item_info: ItemInfo, features: torc
     dtype_str = dtype_to_str(features.dtype)
     sd[f"varlen_i4_llm_features_{dtype_str}"] = features.detach().cpu()
 
-    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL)
+    save_text_encoder_output_cache_common(item_info, sd, ARCHITECTURE_IDEOGRAM4_FULL, merge_existing=False)
 
 
 def save_latent_cache_ernie_image(item_info: ItemInfo, latent: torch.Tensor):
